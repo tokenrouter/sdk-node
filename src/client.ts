@@ -3,16 +3,11 @@
  */
 
 import axios, { AxiosInstance, AxiosError, AxiosResponse } from 'axios';
-import EventSource from 'eventsource';
 import {
   ClientOptions,
   ChatCompletionRequest,
   ChatCompletion,
   ChatCompletionChunk,
-  Model,
-  ModelCosts,
-  Analytics,
-  HealthStatus,
   ChatMessage,
 } from './types';
 import {
@@ -45,7 +40,7 @@ export class TokenRouterClient {
     this.baseUrl = (
       options.baseUrl ||
       process.env.TOKENROUTER_BASE_URL ||
-      'http://localhost:8000'
+      'https://api.tokenrouter.io'
     ).replace(/\/$/, '');
     this.timeout = options.timeout || 60000;
     this.maxRetries = options.maxRetries || 3;
@@ -160,22 +155,22 @@ export class TokenRouterClient {
     }
   }
 
-  /**
-   * Create a chat completion
-   */
+  /** Create chat completion (POST /v1/chat/completions) */
   async createChatCompletion(
     request: ChatCompletionRequest
   ): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
-    if (request.stream) {
-      return this.streamChatCompletion(request);
-    }
-
-    const payload = {
-      ...request,
-      model: request.model || 'auto',
-    };
-
+    const payload = { ...request, model: request.model || 'auto' };
+    if (payload.stream) return this.streamChatCompletion(payload);
     return this.request<ChatCompletion>('POST', '/v1/chat/completions', payload);
+  }
+
+  /** Native TokenRouter create (POST /route) */
+  async create(
+    request: ChatCompletionRequest
+  ): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
+    const payload = { ...request, model: request.model || 'auto' };
+    if (payload.stream) return this.streamCreate(payload);
+    return this.request<ChatCompletion>('POST', '/route', payload);
   }
 
   /**
@@ -236,41 +231,119 @@ export class TokenRouterClient {
   }
 
   /**
-   * Simple completion interface
+   * Stream native create (/route)
    */
-  async createCompletion(prompt: string, model = 'auto'): Promise<ChatCompletion> {
-    const messages: ChatMessage[] = [{ role: 'user', content: prompt }];
-    return this.createChatCompletion({ messages, model }) as Promise<ChatCompletion>;
+  private async *streamCreate(
+    request: ChatCompletionRequest
+  ): AsyncIterable<ChatCompletionChunk> {
+    const url = `${this.baseUrl}/route`;
+    const headers = {
+      Authorization: `Bearer ${this.apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...request, stream: true }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIStatusError(error, response.status);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new TokenRouterError('Failed to get response reader');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') {
+            return;
+          }
+          try {
+            const chunk = JSON.parse(data) as ChatCompletionChunk;
+            yield chunk;
+          } catch (e) {
+            // Ignore parsing errors
+          }
+        }
+      }
+    }
   }
 
-  /**
-   * List available models
-   */
-  async listModels(): Promise<Model[]> {
-    const response = await this.request<{ models: Model[] }>('GET', '/models');
-    return response.models || [];
-  }
+  // Removed shorthand helpers per Request_1
 
   /**
-   * Get model costs
+   * OpenAI legacy completions: client.completions.create
    */
-  async getCosts(): Promise<ModelCosts> {
-    return this.request<ModelCosts>('GET', '/costs');
+  private async *streamCompletions(
+    payload: any
+  ): AsyncIterable<any> {
+    const url = `${this.baseUrl}/v1/completions`;
+    const headers = {
+      Authorization: `Bearer ${this.apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, stream: true }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIStatusError(error, response.status);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new TokenRouterError('Failed to get response reader');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') return;
+          try {
+            yield JSON.parse(data);
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+    }
   }
 
-  /**
-   * Get analytics
-   */
-  async getAnalytics(): Promise<Analytics> {
-    return this.request<Analytics>('GET', '/analytics');
-  }
-
-  /**
-   * Health check
-   */
-  async healthCheck(): Promise<HealthStatus> {
-    return this.request<HealthStatus>('GET', '/health');
-  }
+  // Removed utilities per Request_1
 
   /**
    * OpenAI-compatible chat namespace
@@ -278,6 +351,20 @@ export class TokenRouterClient {
   chat = {
     completions: {
       create: (request: ChatCompletionRequest) => this.createChatCompletion(request),
+    },
+  };
+
+  completions = {
+    create: async (request: { prompt: string; model?: string; mode?: string; model_preferences?: string[]; stream?: boolean; [k: string]: any }) => {
+      const payload = {
+        model: request.model || 'auto',
+        // prompt: request.prompt,
+        mode: request.mode,
+        model_preferences: request.model_preferences,
+        ...request,
+      };
+      if (payload.stream) return this.streamCompletions(payload);
+      return this.request<any>('POST', '/v1/completions', payload);
     },
   };
 }

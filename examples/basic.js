@@ -15,10 +15,13 @@ async function main() {
   console.log('='.repeat(50));
 
   try {
-    // Example 1: Simple completion
-    console.log('\n1. Simple Completion:');
+    // Example 1: Native route completion
+    console.log('\n1. Native Route Completion:');
     console.log('-'.repeat(30));
-    const response1 = await client.createCompletion('What is the capital of France?');
+    const response1 = await client.create({
+      model: 'auto',
+      messages: [{ role: 'user', content: 'What is the capital of France?' }],
+    });
     console.log(`Response: ${response1.choices[0].message.content}`);
     console.log(`Model used: ${response1.model}`);
 
@@ -41,48 +44,14 @@ async function main() {
       console.log(`Latency: ${response2.latencyMs}ms`);
     }
 
-    // Example 3: Model preferences
-    console.log('\n3. With Model Preferences:');
+    // Example 3: Legacy text completions
+    console.log('\n3. Legacy Completions:');
     console.log('-'.repeat(30));
-    const response3 = await client.chat.completions.create({
-      messages: [
-        { role: 'user', content: 'Write a haiku about programming' }
-      ],
-      modelPreferences: ['claude-3-haiku', 'gpt-3.5-turbo'],
-      maxTokens: 50
+    const tcomp = await client.completions.create({
+      prompt: 'Say this is a test',
+      model: 'auto',
     });
-    console.log(`Response: ${response3.choices[0].message.content}`);
-    if (response3.routedModel) {
-      console.log(`Routed to: ${response3.routedModel}`);
-    }
-
-    // Example 4: List available models
-    console.log('\n4. Available Models:');
-    console.log('-'.repeat(30));
-    const models = await client.listModels();
-    models.slice(0, 5).forEach(model => {
-      console.log(`  - ${model.id} (${model.provider})`);
-      if (model.contextWindow) {
-        console.log(`    Context: ${model.contextWindow.toLocaleString()} tokens`);
-      }
-    });
-
-    // Example 5: Get costs
-    console.log('\n5. Model Costs:');
-    console.log('-'.repeat(30));
-    const costs = await client.getCosts();
-    Object.entries(costs).slice(0, 5).forEach(([model, cost]) => {
-      console.log(`  - ${model}: $${cost.toFixed(6)}/1k tokens`);
-    });
-
-    // Example 6: Health check
-    console.log('\n6. API Health Check:');
-    console.log('-'.repeat(30));
-    const health = await client.healthCheck();
-    console.log(`  Status: ${health.status || 'Unknown'}`);
-    if (health.providers) {
-      console.log(`  Available providers: ${health.providers.join(', ')}`);
-    }
+    console.log('Text:', tcomp?.choices?.[0]?.text || '');
 
   } catch (error) {
     console.error('Error:', error.message);

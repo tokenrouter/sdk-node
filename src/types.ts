@@ -10,18 +10,29 @@ export interface ClientOptions {
   headers?: Record<string, string>;
 }
 
+export interface UsageDetails {
+  cached_tokens?: number;
+  audio_tokens?: number;
+  reasoning_tokens?: number;
+  accepted_prediction_tokens?: number;
+  rejected_prediction_tokens?: number;
+}
+
 export interface Usage {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: UsageDetails;
+  completion_tokens_details?: UsageDetails;
 }
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'function' | 'tool';
-  content?: string;
+  // content can be string or array of content blocks
+  content?: any;
   name?: string;
-  functionCall?: FunctionCall;
-  toolCalls?: ToolCall[];
+  function_call?: FunctionCall;
+  tool_calls?: ToolCall[];
 }
 
 export interface FunctionCall {
@@ -38,21 +49,26 @@ export interface ToolCall {
 export interface ChatCompletionChoice {
   index: number;
   message: ChatMessage;
-  finishReason?: string;
+  finish_reason?: string | null;
   logprobs?: any;
 }
 
 export interface ChatCompletion {
   id: string;
-  object: string;
+  object: string; // 'chat.completion'
   created: number;
   model: string;
   choices: ChatCompletionChoice[];
   usage?: Usage;
-  systemFingerprint?: string;
-  costUsd?: number;
-  latencyMs?: number;
-  routedModel?: string;
+  system_fingerprint?: string;
+  // TokenRouter specific
+  service_tier?: string;
+  cost_usd?: number;
+  latency_ms?: number;
+  routed_model?: string;
+  routed_provider?: string;
+  prompt_type?: string;
+  complexity?: number;
 }
 
 export interface ChatCompletionChunk {
@@ -68,25 +84,23 @@ export interface ChatCompletionChunk {
   usage?: Usage;
 }
 
+export type RoutingMode = 'cost' | 'quality' | 'latency' | 'balanced';
+
 export interface ChatCompletionRequest {
   messages: ChatMessage[];
-  model?: string;
-  temperature?: number;
-  maxTokens?: number;
-  topP?: number;
-  frequencyPenalty?: number;
-  presencePenalty?: number;
-  stop?: string | string[];
-  stream?: boolean;
-  n?: number;
-  logprobs?: boolean;
-  echo?: boolean;
-  user?: string;
-  modelPreferences?: string[];
-  tools?: Tool[];
-  toolChoice?: string | ToolChoice;
-  responseFormat?: ResponseFormat;
-  seed?: number;
+  model?: string; // default 'auto'
+  mode?: RoutingMode; // TokenRouter-only
+  model_preferences?: string[]; // TokenRouter-only
+  max_completion_tokens?: number | null;
+  max_tokens?: number | null; // deprecated
+  response_format?: Record<string, any> | null;
+  stream?: boolean | null;
+  temperature?: number | null;
+  tool_choice?: string | ToolChoice | null;
+  tools?: Tool[] | null;
+  user?: string | null;
+  // Additional OpenAI-compatible optional fields will be accepted and ignored by API
+  [key: string]: any;
 }
 
 export interface Tool {
@@ -109,34 +123,4 @@ export interface ResponseFormat {
   type: 'text' | 'json_object';
 }
 
-export interface Model {
-  id: string;
-  name: string;
-  provider: string;
-  capabilities: string[];
-  contextWindow?: number;
-  maxOutputTokens?: number;
-  inputCostPer1k?: number;
-  outputCostPer1k?: number;
-}
-
-export interface ModelCosts {
-  [model: string]: number;
-}
-
-export interface Analytics {
-  totalRequests: number;
-  totalTokens: number;
-  totalCostUsd: number;
-  averageLatencyMs: number;
-  modelDistribution: Record<string, number>;
-  errorRate: number;
-  cacheHitRate: number;
-}
-
-export interface HealthStatus {
-  status: string;
-  providers?: string[];
-  timestamp?: string;
-  [key: string]: any;
-}
+// Removed non-routing utility types per Request_1

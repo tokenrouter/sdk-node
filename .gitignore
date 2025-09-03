@@ -140,3 +140,6 @@ coverage/
 # Logs
 logs
 *.log
+
+CLAUDE.md
+AGENTS.md

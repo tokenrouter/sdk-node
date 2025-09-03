@@ -25,7 +25,7 @@ async function main() {
       model: 'auto',
       stream: true,
       temperature: 0.8,
-      maxTokens: 150
+      max_tokens: 150
     }) as AsyncIterable<ChatCompletionChunk>;
 
     // Process the stream
