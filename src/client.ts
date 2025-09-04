@@ -3,9 +3,11 @@
  */
 
 import axios, { AxiosInstance, AxiosError, AxiosResponse } from 'axios';
+import crypto from 'crypto';
 import {
   ClientOptions,
   ChatCompletionRequest,
+  NativeChatCompletionRequest,
   ChatCompletion,
   ChatCompletionChunk,
   ChatMessage,
@@ -28,6 +30,7 @@ export class TokenRouterClient {
   private timeout: number;
   private maxRetries: number;
   private client: AxiosInstance;
+  private trPublicKeyPem?: string;
 
   constructor(options: ClientOptions = {}) {
     this.apiKey = options.apiKey || process.env.TOKENROUTER_API_KEY || '';
@@ -131,7 +134,8 @@ export class TokenRouterClient {
     path: string,
     data?: any,
     params?: any,
-    retryCount = 0
+    retryCount = 0,
+    extraHeaders?: Record<string, string>
   ): Promise<T> {
     try {
       const response = await this.client.request({
@@ -139,6 +143,7 @@ export class TokenRouterClient {
         url: path,
         data,
         params,
+        headers: extraHeaders ? { ...(this.client.defaults.headers.common as any), ...extraHeaders } : undefined,
       });
       return response.data;
     } catch (error: any) {
@@ -149,10 +154,111 @@ export class TokenRouterClient {
         error.statusCode >= 500
       ) {
         await new Promise((resolve) => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
-        return this.request(method, path, data, params, retryCount + 1);
+        return this.request(method, path, data, params, retryCount + 1, extraHeaders);
       }
       throw error;
     }
+  }
+
+  /** Load provider keys from env/.env (dev/CI convenience) */
+  private loadEnvProviderKeys(): Record<string, string> {
+    const keys: Record<string, string> = {};
+    // Simple .env loader (non-invasive)
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const envPath = path.join(process.cwd(), '.env');
+      if (fs.existsSync(envPath)) {
+        const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+        for (const line of lines) {
+          const l = line.trim();
+          if (!l || l.startsWith('#') || !l.includes('=')) continue;
+          const [k, ...rest] = l.split('=');
+          const v = rest.join('=').trim().replace(/^['"]|['"]$/g, '');
+          if (!process.env[k]) process.env[k] = v;
+        }
+      }
+    } catch (_) {}
+
+    const mapping: Record<string, string | undefined> = {
+      openai: process.env.OPENAI_API_KEY,
+      anthropic: process.env.ANTHROPIC_API_KEY,
+      mistral: process.env.MISTRAL_API_KEY,
+      deepseek: process.env.DEEPSEEK_API_KEY,
+      google: process.env.GEMINI_API_KEY, // gemini -> google
+      meta: process.env.META_API_KEY,
+    };
+    for (const [k, v] of Object.entries(mapping)) {
+      if (v) keys[k] = v;
+    }
+    return keys;
+  }
+
+  private async fetchPublicKey(): Promise<string> {
+    if (this.trPublicKeyPem) return this.trPublicKeyPem;
+    const resp = await this.client.get('/.well-known/tr-public-key');
+    const pem = resp.data?.public_key_pem;
+    if (!pem) throw new APIConnectionError('Failed to obtain public key');
+    this.trPublicKeyPem = pem;
+    return pem;
+  }
+
+  private b64url(input: Buffer): string {
+    return input.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  private buildSecureHeaders(keyMode?: string | null): Record<string, string> {
+    const mode = (keyMode || 'auto').toLowerCase();
+    if (mode === 'stored') return {};
+    const providerKeys = this.loadEnvProviderKeys();
+    if (!providerKeys || Object.keys(providerKeys).length === 0) return {};
+
+    // Normalize provider names
+    const norm: Record<string, string> = {};
+    for (const [k, v] of Object.entries(providerKeys)) {
+      if (!v) continue;
+      const key = k.toLowerCase() === 'gemini' ? 'google' : k.toLowerCase() === 'llama' ? 'meta' : k.toLowerCase();
+      norm[key] = v;
+    }
+
+    const plaintext = Buffer.from(JSON.stringify(norm));
+    // AES-256-GCM encrypt
+    const aesKey = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+    const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    // RSA-OAEP-256 encrypt AES key
+    const pubPem = this.trPublicKeyPem;
+    const encryptKey = (buf: Buffer) => {
+      return crypto.publicEncrypt(
+        {
+          key: pubPem!,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: 'sha256',
+        },
+        buf
+      );
+    };
+
+    if (!pubPem) throw new APIConnectionError('Public key unavailable');
+    const ek = encryptKey(aesKey);
+
+    const wrapper = {
+      alg: 'RSA-OAEP-256',
+      enc: 'A256GCM',
+      ek: this.b64url(ek),
+      iv: this.b64url(iv),
+      ct: this.b64url(ct),
+      tag: this.b64url(tag),
+    };
+    const wrapperJson = Buffer.from(JSON.stringify(wrapper));
+    const headerValue = this.b64url(wrapperJson);
+    // Best-effort zeroize
+    aesKey.fill(0);
+    plaintext.fill(0);
+    return { 'X-TR-Provider-Keys': headerValue };
   }
 
   /** Create chat completion (POST /v1/chat/completions) */
@@ -166,11 +272,15 @@ export class TokenRouterClient {
 
   /** Native TokenRouter create (POST /route) */
   async create(
-    request: ChatCompletionRequest
+    request: NativeChatCompletionRequest
   ): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
     const payload = { ...request, model: request.model || 'auto' };
+    if (!this.trPublicKeyPem) {
+      try { await this.fetchPublicKey(); } catch (_) {}
+    }
     if (payload.stream) return this.streamCreate(payload);
-    return this.request<ChatCompletion>('POST', '/route', payload);
+    const extraHeaders = this.buildSecureHeaders(payload.key_mode);
+    return this.request<ChatCompletion>('POST', '/route', payload, undefined, 0, extraHeaders);
   }
 
   /**
@@ -180,7 +290,7 @@ export class TokenRouterClient {
     request: ChatCompletionRequest
   ): AsyncIterable<ChatCompletionChunk> {
     const url = `${this.baseUrl}/v1/chat/completions`;
-    const headers = {
+    const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
@@ -234,14 +344,18 @@ export class TokenRouterClient {
    * Stream native create (/route)
    */
   private async *streamCreate(
-    request: ChatCompletionRequest
+    request: NativeChatCompletionRequest
   ): AsyncIterable<ChatCompletionChunk> {
     const url = `${this.baseUrl}/route`;
-    const headers = {
+    const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
     };
+    try {
+      if (!this.trPublicKeyPem) await this.fetchPublicKey();
+      Object.assign(headers, this.buildSecureHeaders(request.key_mode));
+    } catch (_) {}
 
     const response = await fetch(url, {
       method: 'POST',
@@ -296,7 +410,7 @@ export class TokenRouterClient {
     payload: any
   ): AsyncIterable<any> {
     const url = `${this.baseUrl}/v1/completions`;
-    const headers = {
+    const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',

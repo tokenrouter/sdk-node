@@ -10,17 +10,17 @@ All calls are BYOK. Provide your TokenRouter API key; provider keys are configur
 ## Install
 
 ```bash
-npm install @tokenrouter/sdk
+npm install tokenrouter
 ```
 
 ## Quick Start (Native Route)
 
 ```ts
-import { TokenRouterClient } from '@tokenrouter/sdk';
+import { TokenRouterClient } from 'tokenrouter';
 
 const client = new TokenRouterClient({
   apiKey: process.env.TOKENROUTER_API_KEY!,
-  baseUrl: 'https://api.tokenrouter.io', // or http://localhost:8000
+  baseUrl: 'https://api.tokenrouter.io',
 });
 
 const response = await client.create({
@@ -31,6 +31,9 @@ const response = await client.create({
     { role: 'developer', content: 'You are a helpful assistant.' },
     { role: 'user', content: 'Hello!' },
   ],
+  // Optional: select key behavior
+  // inline|stored|mixed|auto (default)
+  key_mode: 'auto',
 });
 
 console.log(response.choices[0].message.content);
@@ -130,7 +133,7 @@ for await (const chunk of tstream) {
 ## Errors
 
 ```ts
-import { AuthenticationError, RateLimitError, InvalidRequestError, APIConnectionError } from '@tokenrouter/sdk';
+import { AuthenticationError, RateLimitError, InvalidRequestError, APIConnectionError } from 'tokenrouter';
 
 try {
   const r = await client.chat.completions.create({
@@ -153,5 +156,19 @@ try {
 export TOKENROUTER_API_KEY=tr_your-api-key
 # Optional
 export TOKENROUTER_BASE_URL=https://api.tokenrouter.io
-```
 
+# Optional provider keys (auto-detected for inline encryption on native /route only)
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+export GEMINI_API_KEY=...
+export MISTRAL_API_KEY=...
+export DEEPSEEK_API_KEY=...
+export META_API_KEY=...
+
+# When `key_mode` is `inline`, `mixed`, or `auto` (native `/route` only), the SDK:
+# - Auto-loads provider keys from your environment or local `.env` (dev/CI) with the names above
+# - Fetches the API's public key from `/.well-known/tr-public-key`, encrypts keys client-side, and sends them in the `X-TR-Provider-Keys` header (not JSON)
+# - Never persists or logs provider secrets
+
+# Note: `key_mode` is not used on the OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/completions`).
+```

@@ -1,6 +1,6 @@
 {
   "name": "tokenrouter",
-  "version": "1.0.6",
+  "version": "1.0.8",
   "description": "TypeScript/JavaScript SDK for TokenRouter - Intelligent LLM Routing API",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,10 +29,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tokenrouter/tokenrouter-node"
+    "url": "https://github.com/tokenrouter/sdk-node"
   },
   "bugs": {
-    "url": "https://github.com/tokenrouter/tokenrouter-node/issues"
+    "url": "https://github.com/tokenrouter/sdk-node/issues"
   },
   "homepage": "https://docs.tokenrouter.io",
   "dependencies": {

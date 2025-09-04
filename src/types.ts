@@ -86,6 +86,8 @@ export interface ChatCompletionChunk {
 
 export type RoutingMode = 'cost' | 'quality' | 'latency' | 'balanced';
 
+export type KeyMode = 'inline' | 'stored' | 'mixed' | 'auto';
+
 export interface ChatCompletionRequest {
   messages: ChatMessage[];
   model?: string; // default 'auto'
@@ -101,6 +103,11 @@ export interface ChatCompletionRequest {
   user?: string | null;
   // Additional OpenAI-compatible optional fields will be accepted and ignored by API
   [key: string]: any;
+}
+
+// Native route only
+export interface NativeChatCompletionRequest extends ChatCompletionRequest {
+  key_mode?: KeyMode | null;
 }
 
 export interface Tool {
