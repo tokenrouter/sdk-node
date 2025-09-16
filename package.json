@@ -1,11 +1,19 @@
 {
   "name": "tokenrouter",
-  "version": "1.0.8",
+  "version": "1.0.11",
   "description": "TypeScript/JavaScript SDK for TokenRouter - Intelligent LLM Routing API",
   "main": "dist/index.js",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/index.mjs dist/index.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

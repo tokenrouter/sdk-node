@@ -1,16 +1,15 @@
 /**
  * TokenRouter SDK Client
+ * OpenAI Responses API Compatible
  */
 
 import axios, { AxiosInstance, AxiosError, AxiosResponse } from 'axios';
-import crypto from 'crypto';
 import {
   ClientOptions,
-  ChatCompletionRequest,
-  NativeChatCompletionRequest,
-  ChatCompletion,
-  ChatCompletionChunk,
-  ChatMessage,
+  ResponsesCreateParams,
+  Response,
+  ResponseStreamEvent,
+  InputItemsList,
 } from './types';
 import {
   TokenRouterError,
@@ -19,18 +18,16 @@ import {
   InvalidRequestError,
   APIConnectionError,
   APIStatusError,
-  TimeoutError,
   QuotaExceededError,
 } from './errors';
 import { VERSION } from './version';
 
-export class TokenRouterClient {
+export class TokenRouter {
   private apiKey: string;
   private baseUrl: string;
   private timeout: number;
   private maxRetries: number;
   private client: AxiosInstance;
-  private trPublicKeyPem?: string;
 
   constructor(options: ClientOptions = {}) {
     this.apiKey = options.apiKey || process.env.TOKENROUTER_API_KEY || '';
@@ -43,7 +40,7 @@ export class TokenRouterClient {
     this.baseUrl = (
       options.baseUrl ||
       process.env.TOKENROUTER_BASE_URL ||
-      'https://api.tokenrouter.io'
+      'https://api.tokenrouter.io/api'
     ).replace(/\/$/, '');
     this.timeout = options.timeout || 60000;
     this.maxRetries = options.maxRetries || 3;
@@ -84,7 +81,7 @@ export class TokenRouterClient {
    */
   private convertHeaders(headers: any): Record<string, string> | undefined {
     if (!headers) return undefined;
-    
+
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(headers)) {
       if (typeof value === 'string') {
@@ -160,332 +157,214 @@ export class TokenRouterClient {
     }
   }
 
-  /** Load provider keys from env/.env (dev/CI convenience) */
-  private loadEnvProviderKeys(): Record<string, string> {
-    const keys: Record<string, string> = {};
-    // Simple .env loader (non-invasive)
+  /**
+   * Extract text from response output
+   */
+  private extractOutputText(response: Response): string {
+    const texts: string[] = [];
+    for (const item of response.output || []) {
+      if (item.type === 'message' && item.content) {
+        for (const content of item.content) {
+          if (content.type === 'output_text' && content.text) {
+            texts.push(content.text);
+          }
+        }
+      }
+    }
+    return texts.join('');
+  }
+
+  /**
+   * OpenAI-compatible responses namespace
+   */
+  responses = {
+    /**
+     * Create a model response
+     */
+    create: async (params: ResponsesCreateParams): Promise<Response | AsyncIterable<ResponseStreamEvent>> => {
+      if (params.stream) {
+        return this.streamResponse(params);
+      }
+
+      const response = await this.request<Response>('POST', '/v1/responses', params);
+
+      // Add convenience property output_text
+      if (response) {
+        response.output_text = this.extractOutputText(response);
+      }
+
+      return response;
+    },
+
+    /**
+     * Get a model response by ID
+     */
+    get: async (responseId: string, params?: {
+      include?: string[];
+      include_obfuscation?: boolean;
+      starting_after?: number;
+      stream?: boolean;
+    }): Promise<Response | AsyncIterable<ResponseStreamEvent>> => {
+      if (params?.stream) {
+        return this.streamResponseGet(responseId, params);
+      }
+
+      const response = await this.request<Response>('GET', `/v1/responses/${responseId}`, undefined, params);
+
+      // Add convenience property output_text
+      if (response) {
+        response.output_text = this.extractOutputText(response);
+      }
+
+      return response;
+    },
+
+    /**
+     * Delete a model response
+     */
+    delete: async (responseId: string): Promise<{ id: string; object: string; deleted: boolean }> => {
+      return this.request('DELETE', `/v1/responses/${responseId}`);
+    },
+
+    /**
+     * Cancel a background response
+     */
+    cancel: async (responseId: string): Promise<Response> => {
+      const response = await this.request<Response>('POST', `/v1/responses/${responseId}/cancel`);
+
+      // Add convenience property output_text
+      if (response) {
+        response.output_text = this.extractOutputText(response);
+      }
+
+      return response;
+    },
+
+    /**
+     * List input items for a response
+     */
+    listInputItems: async (responseId: string, params?: {
+      after?: string;
+      include?: string[];
+      limit?: number;
+      order?: 'asc' | 'desc';
+    }): Promise<InputItemsList> => {
+      return this.request('GET', `/v1/responses/${responseId}/input_items`, undefined, params);
+    }
+  };
+
+  /**
+   * Stream a response creation
+   */
+  private async *streamResponse(
+    params: ResponsesCreateParams
+  ): AsyncIterable<ResponseStreamEvent> {
+    const url = `${this.baseUrl}/v1/responses`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...params, stream: true }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIStatusError(error, response.status);
+    }
+
+    yield* this.parseSSEStream(response);
+  }
+
+  /**
+   * Stream a response get
+   */
+  private async *streamResponseGet(
+    responseId: string,
+    params?: any
+  ): AsyncIterable<ResponseStreamEvent> {
+    const url = `${this.baseUrl}/v1/responses/${responseId}`;
+    const queryParams = new URLSearchParams({ ...params, stream: 'true' });
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      Accept: 'text/event-stream',
+    };
+
+    const response = await fetch(`${url}?${queryParams}`, {
+      method: 'GET',
+      headers,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIStatusError(error, response.status);
+    }
+
+    yield* this.parseSSEStream(response);
+  }
+
+  /**
+   * Parse Server-Sent Events stream
+   */
+  private async *parseSSEStream(response: globalThis.Response): AsyncIterable<ResponseStreamEvent> {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new TokenRouterError('Failed to get response reader');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
     try {
-      const fs = require('fs');
-      const path = require('path');
-      const envPath = path.join(process.cwd(), '.env');
-      if (fs.existsSync(envPath)) {
-        const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
         for (const line of lines) {
-          const l = line.trim();
-          if (!l || l.startsWith('#') || !l.includes('=')) continue;
-          const [k, ...rest] = l.split('=');
-          const v = rest.join('=').trim().replace(/^['"]|['"]$/g, '');
-          if (!process.env[k]) process.env[k] = v;
-        }
-      }
-    } catch (_) {}
+          if (line.trim() === '') continue;
 
-    const mapping: Record<string, string | undefined> = {
-      openai: process.env.OPENAI_API_KEY,
-      anthropic: process.env.ANTHROPIC_API_KEY,
-      mistral: process.env.MISTRAL_API_KEY,
-      deepseek: process.env.DEEPSEEK_API_KEY,
-      google: process.env.GEMINI_API_KEY, // gemini -> google
-      meta: process.env.META_API_KEY,
-    };
-    for (const [k, v] of Object.entries(mapping)) {
-      if (v) keys[k] = v;
-    }
-    return keys;
-  }
-
-  private async fetchPublicKey(): Promise<string> {
-    if (this.trPublicKeyPem) return this.trPublicKeyPem;
-    const resp = await this.client.get('/.well-known/tr-public-key');
-    const pem = resp.data?.public_key_pem;
-    if (!pem) throw new APIConnectionError('Failed to obtain public key');
-    this.trPublicKeyPem = pem;
-    return pem;
-  }
-
-  private b64url(input: Buffer): string {
-    return input.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  }
-
-  private buildSecureHeaders(keyMode?: string | null): Record<string, string> {
-    const mode = (keyMode || 'auto').toLowerCase();
-    if (mode === 'stored') return {};
-    const providerKeys = this.loadEnvProviderKeys();
-    if (!providerKeys || Object.keys(providerKeys).length === 0) return {};
-
-    // Normalize provider names
-    const norm: Record<string, string> = {};
-    for (const [k, v] of Object.entries(providerKeys)) {
-      if (!v) continue;
-      const key = k.toLowerCase() === 'gemini' ? 'google' : k.toLowerCase() === 'llama' ? 'meta' : k.toLowerCase();
-      norm[key] = v;
-    }
-
-    const plaintext = Buffer.from(JSON.stringify(norm));
-    // AES-256-GCM encrypt
-    const aesKey = crypto.randomBytes(32);
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
-    const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const tag = cipher.getAuthTag();
-
-    // RSA-OAEP-256 encrypt AES key
-    const pubPem = this.trPublicKeyPem;
-    const encryptKey = (buf: Buffer) => {
-      return crypto.publicEncrypt(
-        {
-          key: pubPem!,
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256',
-        },
-        buf
-      );
-    };
-
-    if (!pubPem) throw new APIConnectionError('Public key unavailable');
-    const ek = encryptKey(aesKey);
-
-    const wrapper = {
-      alg: 'RSA-OAEP-256',
-      enc: 'A256GCM',
-      ek: this.b64url(ek),
-      iv: this.b64url(iv),
-      ct: this.b64url(ct),
-      tag: this.b64url(tag),
-    };
-    const wrapperJson = Buffer.from(JSON.stringify(wrapper));
-    const headerValue = this.b64url(wrapperJson);
-    // Best-effort zeroize
-    aesKey.fill(0);
-    plaintext.fill(0);
-    return { 'X-TR-Provider-Keys': headerValue };
-  }
-
-  /** Create chat completion (POST /v1/chat/completions) */
-  async createChatCompletion(
-    request: ChatCompletionRequest
-  ): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
-    const payload = { ...request, model: request.model || 'auto' };
-    if (payload.stream) return this.streamChatCompletion(payload);
-    return this.request<ChatCompletion>('POST', '/v1/chat/completions', payload);
-  }
-
-  /** Native TokenRouter create (POST /route) */
-  async create(
-    request: NativeChatCompletionRequest
-  ): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
-    const payload = { ...request, model: request.model || 'auto' };
-    if (!this.trPublicKeyPem) {
-      try { await this.fetchPublicKey(); } catch (_) {}
-    }
-    if (payload.stream) return this.streamCreate(payload);
-    const extraHeaders = this.buildSecureHeaders(payload.key_mode);
-    return this.request<ChatCompletion>('POST', '/route', payload, undefined, 0, extraHeaders);
-  }
-
-  /**
-   * Stream a chat completion
-   */
-  private async *streamChatCompletion(
-    request: ChatCompletionRequest
-  ): AsyncIterable<ChatCompletionChunk> {
-    const url = `${this.baseUrl}/v1/chat/completions`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ ...request, stream: true }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new APIStatusError(error, response.status);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new TokenRouterError('Failed to get response reader');
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') {
-            return;
+          if (line.startsWith('event: ')) {
+            // Handle event type if needed
+            continue;
           }
-          try {
-            const chunk = JSON.parse(data) as ChatCompletionChunk;
-            yield chunk;
-          } catch (e) {
-            // Ignore parsing errors
+
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') {
+              return;
+            }
+
+            try {
+              const event = JSON.parse(data) as ResponseStreamEvent;
+
+              // Add convenience property output_text for completed responses
+              if (event?.type === 'response.completed' && event?.response) {
+                event.response.output_text = this.extractOutputText(event.response);
+              }
+
+              yield event;
+            } catch (e) {
+              // Ignore parsing errors
+              console.error('Failed to parse SSE event:', e);
+            }
           }
         }
       }
+    } finally {
+      reader.releaseLock();
     }
   }
-
-  /**
-   * Stream native create (/route)
-   */
-  private async *streamCreate(
-    request: NativeChatCompletionRequest
-  ): AsyncIterable<ChatCompletionChunk> {
-    const url = `${this.baseUrl}/route`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    };
-    try {
-      if (!this.trPublicKeyPem) await this.fetchPublicKey();
-      Object.assign(headers, this.buildSecureHeaders(request.key_mode));
-    } catch (_) {}
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ ...request, stream: true }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new APIStatusError(error, response.status);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new TokenRouterError('Failed to get response reader');
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') {
-            return;
-          }
-          try {
-            const chunk = JSON.parse(data) as ChatCompletionChunk;
-            yield chunk;
-          } catch (e) {
-            // Ignore parsing errors
-          }
-        }
-      }
-    }
-  }
-
-  // Removed shorthand helpers per Request_1
-
-  /**
-   * OpenAI legacy completions: client.completions.create
-   */
-  private async *streamCompletions(
-    payload: any
-  ): AsyncIterable<any> {
-    const url = `${this.baseUrl}/v1/completions`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ ...payload, stream: true }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new APIStatusError(error, response.status);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new TokenRouterError('Failed to get response reader');
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') return;
-          try {
-            yield JSON.parse(data);
-          } catch (e) {
-            // ignore
-          }
-        }
-      }
-    }
-  }
-
-  // Removed utilities per Request_1
-
-  /**
-   * OpenAI-compatible chat namespace
-   */
-  chat = {
-    completions: {
-      create: (request: ChatCompletionRequest) => this.createChatCompletion(request),
-    },
-  };
-
-  completions = {
-    create: async (request: { prompt: string; model?: string; mode?: string; model_preferences?: string[]; stream?: boolean; [k: string]: any }) => {
-      const payload = {
-        model: request.model || 'auto',
-        // prompt: request.prompt,
-        mode: request.mode,
-        model_preferences: request.model_preferences,
-        ...request,
-      };
-      if (payload.stream) return this.streamCompletions(payload);
-      return this.request<any>('POST', '/v1/completions', payload);
-    },
-  };
 }
 
 /**
- * Async client (alias for compatibility)
+ * Default export for OpenAI compatibility
  */
-export class TokenRouterAsyncClient extends TokenRouterClient {
-  // All methods are already async in the base class
-}
+export default TokenRouter;

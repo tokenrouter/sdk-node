@@ -1,174 +1,238 @@
 # TokenRouter Node.js SDK
 
-Official Node.js/TypeScript SDK for TokenRouter routing. This SDK exposes only the routing endpoints:
-- client.create(...) → Native routing (/route)
-- client.chat.completions.create(...) → OpenAI chat completions (/v1/chat/completions)
-- client.completions.create(...) → OpenAI legacy completions (/v1/completions)
+OpenAI Responses API compatible client for TokenRouter - intelligent LLM routing service.
 
-All calls are BYOK. Provide your TokenRouter API key; provider keys are configured in TokenRouter.
-
-## Install
+## Installation
 
 ```bash
 npm install tokenrouter
 ```
 
-## Quick Start (Native Route)
+## Quick Start
 
-```ts
-import { TokenRouterClient } from 'tokenrouter';
+```javascript
+import TokenRouter from "tokenrouter";
 
-const client = new TokenRouterClient({
-  apiKey: process.env.TOKENROUTER_API_KEY!,
-  baseUrl: 'https://api.tokenrouter.io',
+const client = new TokenRouter({
+  apiKey: process.env['TOKENROUTER_API_KEY'], // This is the default and can be omitted
+  baseUrl: process.env['TOKENROUTER_BASE_URL'], // Default: https://api.tokenrouter.io/api
 });
 
-const response = await client.create({
-  model: 'auto',
-  mode: 'balanced',
-  model_preferences: ['gpt-4o', 'gpt-4o-mini'],
-  messages: [
-    { role: 'developer', content: 'You are a helpful assistant.' },
-    { role: 'user', content: 'Hello!' },
-  ],
-  // Optional: select key behavior
-  // inline|stored|mixed|auto (default)
-  key_mode: 'auto',
+const response = await client.responses.create({
+    model: "gpt-4.1",
+    input: "Tell me a three sentence bedtime story about a unicorn."
 });
 
-console.log(response.choices[0].message.content);
+console.log(response.output_text);
 ```
 
-## Endpoints
+## OpenAI Compatibility
 
-### Native Route (/route)
+This SDK is designed to be a drop-in replacement for OpenAI's SDK when using the Responses API. Simply change your import and API key:
 
-Non‑streaming
-```ts
-const resp = await client.create({
-  model: 'auto',
-  mode: 'balanced',
-  model_preferences: ['gpt-4o', 'gpt-4o-mini'],
-  messages: [
-    { role: 'developer', content: 'You are a helpful assistant.' },
-    { role: 'user', content: 'Hello!' },
-  ],
-});
-console.log(resp.choices[0].message.content);
+```javascript
+// Before (OpenAI)
+import OpenAI from "openai";
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// After (TokenRouter)
+import TokenRouter from "tokenrouter";
+const client = new TokenRouter({ apiKey: process.env.TOKENROUTER_API_KEY });
 ```
 
-Streaming
-```ts
-const stream = (await client.create({
-  model: 'auto',
-  stream: true,
-  messages: [
-    { role: 'developer', content: 'You are a helpful assistant.' },
-    { role: 'user', content: 'Stream a short greeting.' },
-  ],
-})) as AsyncIterable<any>;
+## API Reference
 
-for await (const chunk of stream) {
-  const delta = chunk?.choices?.[0]?.delta;
-  if (delta?.content) process.stdout.write(delta.content);
+### Create Response
+
+```javascript
+const response = await client.responses.create({
+  // Required
+  input: "Your prompt here", // or array of input items
+
+  // Optional
+  model: "gpt-4.1", // Model to use
+  instructions: "System instructions",
+  max_output_tokens: 1000,
+  temperature: 0.7,
+  top_p: 0.9,
+  stream: false, // Set to true for streaming
+  tools: [], // Function calling tools
+  tool_choice: "auto",
+  text: { format: { type: "text" } }, // Response format
+  // ... other OpenAI-compatible parameters
+});
+
+// Access the response text directly
+console.log(response.output_text);
+```
+
+### Streaming Responses
+
+```javascript
+const stream = await client.responses.create({
+  input: "Write a poem",
+  stream: true
+});
+
+for await (const event of stream) {
+  if (event.type === 'response.delta' && event.delta?.output) {
+    for (const item of event.delta.output) {
+      if (item.content) {
+        for (const content of item.content) {
+          if (content.text) {
+            process.stdout.write(content.text);
+          }
+        }
+      }
+    }
+  }
 }
 ```
 
-### Chat Completions (/v1/chat/completions)
+### Function Calling
 
-OpenAI‑compatible chat completions.
-
-```ts
-const chat = await client.chat.completions.create({
-  model: 'auto',
-  mode: 'balanced',
-  model_preferences: ['gpt-4o', 'gpt-4o-mini'],
-  messages: [
-    { role: 'developer', content: 'You are a helpful assistant.' },
-    { role: 'user', content: 'Hello!' },
-  ],
+```javascript
+const response = await client.responses.create({
+  input: "What's the weather in San Francisco?",
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "get_weather",
+        description: "Get the current weather",
+        parameters: {
+          type: "object",
+          properties: {
+            location: { type: "string" }
+          },
+          required: ["location"]
+        }
+      }
+    }
+  ]
 });
-console.log(chat.choices[0].message.content);
-```
 
-Streaming
-```ts
-const chatStream = (await client.chat.completions.create({
-  model: 'auto',
-  stream: true,
-  messages: [
-    { role: 'developer', content: 'You are a helpful assistant.' },
-    { role: 'user', content: 'Hello!' },
-  ],
-})) as AsyncIterable<any>;
-for await (const chunk of chatStream) {
-  const delta = chunk?.choices?.[0]?.delta;
-  if (delta?.content) process.stdout.write(delta.content);
+// Check for function calls in the response
+for (const item of response.output) {
+  if (item.type === 'tool_call' && item.tool_calls) {
+    for (const toolCall of item.tool_calls) {
+      if (toolCall.function) {
+        console.log(`Function: ${toolCall.function.name}`);
+        console.log(`Arguments: ${toolCall.function.arguments}`);
+      }
+    }
+  }
 }
 ```
 
-### Legacy Completions (/v1/completions)
+### Multi-turn Conversations
 
-Returns OpenAI legacy text completion JSON (raw dict).
-
-```ts
-const tc = await client.completions.create({
-  prompt: 'Say this is a test',
-  model: 'auto',
-  mode: 'balanced',
+```javascript
+// First message
+const response1 = await client.responses.create({
+  input: "My name is Alice",
+  store: true // Store for later retrieval
 });
-console.log(tc.choices?.[0]?.text);
 
-const tstream = (await client.completions.create({
-  prompt: 'Stream text completion please',
-  model: 'auto',
-  stream: true,
-})) as AsyncIterable<any>;
-for await (const chunk of tstream) {
-  const text = chunk?.choices?.[0]?.text;
-  if (text) process.stdout.write(text);
-}
+// Continue conversation
+const response2 = await client.responses.create({
+  input: "What's my name?",
+  previous_response_id: response1.id
+});
 ```
 
-## Errors
+### Other Methods
 
-```ts
-import { AuthenticationError, RateLimitError, InvalidRequestError, APIConnectionError } from 'tokenrouter';
+```javascript
+// Get response by ID
+const response = await client.responses.get("resp_123");
+
+// Delete response
+const result = await client.responses.delete("resp_123");
+
+// Cancel background response
+const response = await client.responses.cancel("resp_123");
+
+// List input items
+const items = await client.responses.listInputItems("resp_123");
+```
+
+## Error Handling
+
+```javascript
+import {
+  TokenRouterError,
+  AuthenticationError,
+  RateLimitError,
+  InvalidRequestError
+} from 'tokenrouter';
 
 try {
-  const r = await client.chat.completions.create({
-    messages: [{ role: 'user', content: 'Hello' }],
-    model: 'auto',
+  const response = await client.responses.create({
+    input: "Hello"
   });
-  console.log(r.choices[0].message.content);
-} catch (e: any) {
-  if (e instanceof RateLimitError) console.log('Retry after', e.retryAfter);
-  else if (e instanceof AuthenticationError) console.log('Invalid API key');
-  else if (e instanceof InvalidRequestError) console.log('Invalid request');
-  else if (e instanceof APIConnectionError) console.log('Connection error');
-  else console.log('Unexpected error', e);
+} catch (error) {
+  if (error instanceof AuthenticationError) {
+    console.error('Invalid API key');
+  } else if (error instanceof RateLimitError) {
+    console.error('Rate limit exceeded, retry after:', error.retryAfter);
+  } else if (error instanceof InvalidRequestError) {
+    console.error('Invalid request:', error.message);
+  } else {
+    console.error('Unexpected error:', error);
+  }
 }
 ```
 
-## Environment
+## Configuration
+
+### Environment Variables
 
 ```bash
 export TOKENROUTER_API_KEY=tr_your-api-key
-# Optional
-export TOKENROUTER_BASE_URL=https://api.tokenrouter.io
-
-# Optional provider keys (auto-detected for inline encryption on native /route only)
-export OPENAI_API_KEY=sk-...
-export ANTHROPIC_API_KEY=sk-ant-...
-export GEMINI_API_KEY=...
-export MISTRAL_API_KEY=...
-export DEEPSEEK_API_KEY=...
-export META_API_KEY=...
-
-# When `key_mode` is `inline`, `mixed`, or `auto` (native `/route` only), the SDK:
-# - Auto-loads provider keys from your environment or local `.env` (dev/CI) with the names above
-# - Fetches the API's public key from `/.well-known/tr-public-key`, encrypts keys client-side, and sends them in the `X-TR-Provider-Keys` header (not JSON)
-# - Never persists or logs provider secrets
-
-# Note: `key_mode` is not used on the OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/completions`).
+export TOKENROUTER_BASE_URL=https://api.tokenrouter.io/api  # Optional
 ```
+
+### Client Options
+
+```javascript
+const client = new TokenRouter({
+  apiKey: 'tr_...', // Your API key
+  baseUrl: 'https://api.tokenrouter.io/api', // API base URL
+  timeout: 60000, // Request timeout in ms (default: 60000)
+  maxRetries: 3, // Max retry attempts (default: 3)
+  headers: { // Additional headers
+    'X-Custom-Header': 'value'
+  }
+});
+```
+
+## TypeScript Support
+
+The SDK is written in TypeScript and provides full type definitions:
+
+```typescript
+import TokenRouter, {
+  ResponsesCreateParams,
+  Response,
+  ResponseStreamEvent
+} from 'tokenrouter';
+
+const params: ResponsesCreateParams = {
+  input: "Hello",
+  model: "gpt-4.1"
+};
+
+const response: Response = await client.responses.create(params);
+```
+
+## Examples
+
+See the [examples](./examples) directory for more detailed usage examples:
+
+- [simple.js](./examples/simple.js) - Basic usage
+- [responses-example.ts](./examples/responses-example.ts) - Comprehensive examples
+
+## License
+
+MIT
