@@ -40,7 +40,7 @@ export class TokenRouter {
     this.baseUrl = (
       options.baseUrl ||
       process.env.TOKENROUTER_BASE_URL ||
-      'https://api.tokenrouter.io/api'
+      'https://api.tokenrouter.io'
     ).replace(/\/$/, '');
     this.timeout = options.timeout || 60000;
     this.maxRetries = options.maxRetries || 3;
@@ -319,48 +319,145 @@ export class TokenRouter {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    const extractEvent = (chunk: string): ResponseStreamEvent | null => {
+      const lines = chunk.split(/\r?\n/);
+      let eventType: string | undefined;
+      let eventId: string | undefined;
+      const dataLines: string[] = [];
+
+      for (const line of lines) {
+        if (!line) {
+          continue;
+        }
+
+        if (line.startsWith('event:')) {
+          eventType = line.slice(6).trim();
+          continue;
+        }
+
+        if (line.startsWith('id:')) {
+          eventId = line.slice(3).trim();
+          continue;
+        }
+
+        if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart());
+          continue;
+        }
+
+        if (line.startsWith(':')) {
+          // Comment line; ignore.
+          continue;
+        }
+      }
+
+      if (dataLines.length === 0) {
+        return null;
+      }
+
+      const dataString = dataLines.join('\n');
+
+      if (dataString === '[DONE]') {
+        const doneEvent: ResponseStreamEvent = { type: eventType ?? 'done' };
+        if (eventId) {
+          (doneEvent as any).event_id = eventId;
+        }
+
+        return doneEvent;
+      }
+
+      try {
+        const payload = JSON.parse(dataString);
+        return this.normaliseStreamEvent(payload, eventType, eventId);
+      } catch (error) {
+        console.error('Failed to parse SSE event:', error, dataString);
+        return null;
+      }
+    };
+
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+        }
 
-        for (const line of lines) {
-          if (line.trim() === '') continue;
+        if (done) {
+          buffer += decoder.decode();
+          buffer += '\n\n';
+        }
 
-          if (line.startsWith('event: ')) {
-            // Handle event type if needed
+        while (true) {
+          let boundary = buffer.indexOf('\n\n');
+          let delimiterLength = 2;
+
+          if (boundary === -1) {
+            boundary = buffer.indexOf('\r\n\r\n');
+            delimiterLength = 4;
+          }
+
+          if (boundary === -1) {
+            break;
+          }
+
+          const chunk = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + delimiterLength);
+
+          if (!chunk.trim()) {
             continue;
           }
 
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') {
+          const event = extractEvent(chunk);
+          if (event) {
+            yield event;
+
+            if (event.type === 'done') {
               return;
             }
-
-            try {
-              const event = JSON.parse(data) as ResponseStreamEvent;
-
-              // Add convenience property output_text for completed responses
-              if (event?.type === 'response.completed' && event?.response) {
-                event.response.output_text = this.extractOutputText(event.response);
-              }
-
-              yield event;
-            } catch (e) {
-              // Ignore parsing errors
-              console.error('Failed to parse SSE event:', e);
-            }
           }
+        }
+
+        if (done) {
+          break;
         }
       }
     } finally {
       reader.releaseLock();
     }
+  }
+
+  private normaliseStreamEvent(payload: any, fallbackType?: string, eventId?: string): ResponseStreamEvent {
+    let event: any;
+
+    if (Array.isArray(payload)) {
+      event = {
+        type: fallbackType ?? 'response.delta',
+        delta: { output: payload },
+      };
+    } else if (payload && typeof payload === 'object') {
+      event = { ...payload };
+    } else {
+      event = { type: fallbackType ?? 'event', data: payload };
+    }
+
+    if (!event.type) {
+      event.type = fallbackType ?? 'event';
+    }
+
+    if (eventId && !event.event_id) {
+      event.event_id = eventId;
+    }
+
+    if (event.raw === undefined) {
+      event.raw = payload;
+    }
+
+    if (event?.type === 'response.completed' && event?.response) {
+      event.response.output_text = this.extractOutputText(event.response);
+    }
+
+    return event as ResponseStreamEvent;
   }
 }
 

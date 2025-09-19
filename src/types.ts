@@ -261,10 +261,15 @@ export interface Usage {
 
 // Streaming Types
 export interface ResponseStreamEvent {
-  type: 'response.created' | 'response.updated' | 'response.delta' | 'response.completed' | 'response.failed';
+  type: string;
   response?: Response;
   delta?: ResponseDelta;
   error?: ErrorDetail;
+  metadata?: Record<string, unknown>;
+  event_id?: string;
+  rate_limits?: Record<string, unknown>[];
+  data?: unknown;
+  raw?: unknown;
   timestamp?: number;
 }
 
